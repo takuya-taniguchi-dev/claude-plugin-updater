@@ -8,6 +8,7 @@ set -euo pipefail
 PLUGINS_DIR="${CLAUDE_PLUGINS_DIR:-$HOME/.claude/plugins}"
 MARKETPLACE_DIR="$PLUGINS_DIR/marketplaces"
 CACHE_DIR="$PLUGINS_DIR/cache"
+INSTALLED_PLUGINS="$PLUGINS_DIR/installed_plugins.json"
 
 update_plugin() {
   local plugin_dir="$1"
@@ -42,6 +43,39 @@ update_plugin() {
   fi
 }
 
+update_registry() {
+  local vendor="$1"
+  local plugin_dir="$2"
+
+  [ -f "$INSTALLED_PLUGINS" ] || return 0
+  [ -d "$plugin_dir/.git" ] || return 0
+
+  cd "$plugin_dir"
+  local version commit_sha
+  version=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' package.json 2>/dev/null | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/"//' ) || return 0
+  commit_sha=$(git rev-parse HEAD 2>/dev/null) || return 0
+
+  # Find plugin name from package.json
+  local plugin_name
+  plugin_name=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' package.json 2>/dev/null | head -1 | sed 's/.*"name"[[:space:]]*:[[:space:]]*"//;s/"//' ) || return 0
+
+  local plugin_key="${plugin_name}@${vendor}"
+  local cache_path="$CACHE_DIR/$vendor/$plugin_name/$version"
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+  # Update installPath, version, gitCommitSha, lastUpdated if plugin exists in registry
+  if grep -q "$plugin_key" "$INSTALLED_PLUGINS" 2>/dev/null; then
+    local tmp_file="${INSTALLED_PLUGINS}.tmp"
+    sed \
+      -e "/$plugin_key/,/}/ s|\"installPath\": *\"[^\"]*\"|\"installPath\": \"$cache_path\"|" \
+      -e "/$plugin_key/,/}/ s|\"version\": *\"[^\"]*\"|\"version\": \"$version\"|" \
+      -e "/$plugin_key/,/}/ s|\"gitCommitSha\": *\"[^\"]*\"|\"gitCommitSha\": \"$commit_sha\"|" \
+      -e "/$plugin_key/,/}/ s|\"lastUpdated\": *\"[^\"]*\"|\"lastUpdated\": \"$now\"|" \
+      "$INSTALLED_PLUGINS" > "$tmp_file" && mv "$tmp_file" "$INSTALLED_PLUGINS"
+  fi
+}
+
 clean_old_caches() {
   local cache_path="$1"
 
@@ -66,6 +100,7 @@ for vendor_dir in "$MARKETPLACE_DIR"/*/; do
   vendor=$(basename "$vendor_dir")
 
   update_plugin "$vendor_dir"
+  update_registry "$vendor" "$vendor_dir"
 
   # Clean caches for all plugins under this vendor
   if [ -d "$CACHE_DIR/$vendor" ]; then
