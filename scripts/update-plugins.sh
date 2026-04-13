@@ -147,7 +147,7 @@ except Exception:
 
 sort_semver() {
   # Sort version directory names by semver (descending), non-semver names are excluded
-  grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -t. -k1,1rn -k2,2rn -k3,3rn
+  { grep -E '^[0-9]+\.[0-9]+\.[0-9]+' || true; } | sort -t. -k1,1rn -k2,2rn -k3,3rn
 }
 
 clean_old_caches() {
