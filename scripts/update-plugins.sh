@@ -27,13 +27,16 @@ acquire_lock() {
 }
 
 release_lock() {
-  rm -f "$LOCK_FILE"
+  local lock_pid
+  lock_pid=$(cat "$LOCK_FILE" 2>/dev/null) || return 0
+  [ "$lock_pid" = "$$" ] && rm -f "$LOCK_FILE"
 }
 
 trap release_lock EXIT
 
 # --- Functions ---
 
+# Must be called from within a git repository directory
 detect_default_branch() {
   local branch
   branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
@@ -88,6 +91,7 @@ update_registry() {
   [ -d "$plugin_dir/.git" ] || return 0
   command -v python3 &>/dev/null || return 0
 
+  # npm package names cannot contain spaces, so space-delimited read is safe
   local plugin_name version commit_sha
   read -r plugin_name version <<< "$(python3 -c "
 import json,sys
@@ -98,6 +102,9 @@ print(d['name'], d['version'])
 
   local plugin_key="${plugin_name}@${vendor}"
   local cache_path="$CACHE_DIR/$vendor/$plugin_name/$version"
+
+  # Skip if cache directory doesn't exist (avoids "Plugin directory does not exist" error)
+  [ -d "$cache_path" ] || return 0
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
