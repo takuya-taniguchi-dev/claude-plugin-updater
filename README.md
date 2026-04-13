@@ -31,10 +31,20 @@ The installer copies `update-plugins.sh` to `~/.claude/scripts/` and prints hook
 
 ## Usage
 
-### Manual
+### Commands
 
 ```bash
+# Auto-update (default hook mode) — safe updates are applied, risky ones saved as pending
 bash ~/.claude/scripts/update-plugins.sh
+
+# Show pending actions (no lock needed)
+bash ~/.claude/scripts/update-plugins.sh --status
+
+# Interactively review and approve pending updates/cleanups
+bash ~/.claude/scripts/update-plugins.sh --approve
+
+# Force mode — skip confirmations, apply all updates and delete old caches immediately
+bash ~/.claude/scripts/update-plugins.sh --force
 ```
 
 ### Claude Code SessionStart Hook
@@ -50,7 +60,7 @@ Add to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "bash $HOME/.claude/scripts/update-plugins.sh 2>/dev/null; exit 0",
+            "command": "bash $HOME/.claude/scripts/update-plugins.sh 2>/dev/null || true",
             "timeout": 30000
           }
         ]
@@ -135,9 +145,11 @@ systemctl --user enable --now claude-plugin-updater.timer
 
 1. Scans `~/.claude/plugins/marketplaces/` for git-managed plugins
 2. Runs `git fetch` to check for updates (skips if offline)
-3. If updates are available, pulls the latest changes and installs dependencies
-4. Updates `~/.claude/plugins/installed_plugins.json` to point to the new version
-5. Scans `~/.claude/plugins/cache/` and removes all but the latest version (semver sorted)
+3. Runs a multi-layer security audit on the diff before merging
+4. If security warnings are detected: **saves the update as pending** for user approval (instead of auto-merging)
+5. If no warnings: applies the update and installs dependencies
+6. Updates `~/.claude/plugins/installed_plugins.json` to point to the new version
+7. Detects old cache versions in `~/.claude/plugins/cache/` and **saves them as pending cleanup** for user approval
 
 ## Configuration
 

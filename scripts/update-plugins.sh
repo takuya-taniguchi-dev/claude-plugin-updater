@@ -14,6 +14,15 @@ VERBOSE="${CLAUDE_PLUGIN_UPDATE_VERBOSE:-0}"
 # Audit mode: "warn" = log warnings but proceed with update (default)
 #             "block" = block updates when suspicious changes are detected
 AUDIT_MODE="${CLAUDE_PLUGIN_AUDIT_MODE:-warn}"
+PENDING_FILE="$PLUGINS_DIR/.pending-actions.json"
+
+# CLI arguments: auto (hook default), approve (interactive), status (show pending), force (old behavior)
+ACTION="auto"
+case "${1:-}" in
+  --approve) ACTION="approve" ;;
+  --status)  ACTION="status" ;;
+  --force)   ACTION="force" ;;
+esac
 
 # --- Logging ---
 
@@ -25,6 +34,111 @@ log_verbose() {
 log_error() {
   echo "[update-plugins] ERROR: $*" >&2
 }
+
+log_notify() {
+  echo "[plugin-updater] $*"
+}
+
+# --- Pending Actions ---
+
+pending_add_update() {
+  local vendor="$1" plugin_name="$2" plugin_dir="$3" old_hash="$4" new_hash="$5" default_branch="$6"
+  python3 -c "
+import json, sys, os
+path = sys.argv[1]
+try:
+    with open(path) as f: data = json.load(f)
+except: data = {'pending_updates': [], 'pending_cleanups': []}
+vendor, name, pdir, old_h, new_h, branch = sys.argv[2:8]
+data['pending_updates'] = [e for e in data['pending_updates'] if not (e.get('plugin_name') == name and e.get('vendor') == vendor)]
+data['pending_updates'].append({'vendor': vendor, 'plugin_name': name, 'plugin_dir': pdir, 'old_hash': old_h, 'new_hash': new_h, 'default_branch': branch, 'created_at': sys.argv[8]})
+tmp = path + '.tmp'
+with open(tmp, 'w') as f: json.dump(data, f, indent=2, ensure_ascii=False); f.write('\n')
+os.replace(tmp, path)
+" "$PENDING_FILE" "$vendor" "$plugin_name" "$plugin_dir" "$old_hash" "$new_hash" "$default_branch" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+pending_add_cleanup() {
+  local full_path="$1" version="$2" plugin_name="$3" vendor="$4"
+  python3 -c "
+import json, sys, os
+path = sys.argv[1]
+try:
+    with open(path) as f: data = json.load(f)
+except: data = {'pending_updates': [], 'pending_cleanups': []}
+fp, ver, name, vendor = sys.argv[2:6]
+if not any(e.get('path') == fp for e in data['pending_cleanups']):
+    data['pending_cleanups'].append({'path': fp, 'version': ver, 'plugin_name': name, 'vendor': vendor, 'created_at': sys.argv[6]})
+tmp = path + '.tmp'
+with open(tmp, 'w') as f: json.dump(data, f, indent=2, ensure_ascii=False); f.write('\n')
+os.replace(tmp, path)
+" "$PENDING_FILE" "$full_path" "$version" "$plugin_name" "$vendor" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
+pending_show() {
+  [ -f "$PENDING_FILE" ] || { echo "No pending actions."; return 0; }
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+us = data.get('pending_updates', [])
+cs = data.get('pending_cleanups', [])
+if not us and not cs: print('No pending actions.'); sys.exit(0)
+if us:
+    print(f'Pending updates ({len(us)}):')
+    for u in us:
+        print(f'  {u[\"vendor\"]}/{u[\"plugin_name\"]}: {u[\"old_hash\"][:8]}..{u[\"new_hash\"][:8]} (since {u[\"created_at\"]})')
+        print(f'    -> Security warnings detected. Review audit log before approving.')
+if cs:
+    print(f'Pending cache cleanups ({len(cs)}):')
+    for c in cs:
+        print(f'  {c[\"vendor\"]}/{c[\"plugin_name\"]} v{c[\"version\"]} ({c[\"path\"]})')
+print()
+print('Run: bash ~/.claude/scripts/update-plugins.sh --approve')
+" "$PENDING_FILE"
+}
+
+pending_has_items() {
+  [ -f "$PENDING_FILE" ] || return 1
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+if data.get('pending_updates') or data.get('pending_cleanups'): sys.exit(0)
+sys.exit(1)
+" "$PENDING_FILE"
+}
+
+pending_clear_updates() {
+  [ -f "$PENDING_FILE" ] || return 0
+  python3 -c "
+import json, sys, os
+path = sys.argv[1]
+with open(path) as f: data = json.load(f)
+data['pending_updates'] = []
+tmp = path + '.tmp'
+with open(tmp, 'w') as f: json.dump(data, f, indent=2); f.write('\n')
+os.replace(tmp, path)
+" "$PENDING_FILE"
+}
+
+pending_clear_cleanups() {
+  [ -f "$PENDING_FILE" ] || return 0
+  python3 -c "
+import json, sys, os
+path = sys.argv[1]
+with open(path) as f: data = json.load(f)
+data['pending_cleanups'] = []
+tmp = path + '.tmp'
+with open(tmp, 'w') as f: json.dump(data, f, indent=2); f.write('\n')
+os.replace(tmp, path)
+" "$PENDING_FILE"
+}
+
+# --- Status mode (no lock needed) ---
+
+if [ "$ACTION" = "status" ]; then
+  pending_show
+  exit 0
+fi
 
 # --- Lock ---
 
@@ -394,8 +508,13 @@ update_plugin() {
       if [ "$AUDIT_MODE" = "block" ]; then
         audit_warn "$pname" "Update BLOCKED — suspicious changes between $local_hash and $remote_hash"
         exit 2
+      elif [ "$ACTION" = "force" ]; then
+        audit_warn "$pname" "Suspicious changes detected between $local_hash and $remote_hash — force-proceeding (audit_mode=warn)"
       else
-        audit_warn "$pname" "Suspicious changes detected between $local_hash and $remote_hash — proceeding (audit_mode=warn)"
+        # auto mode: save pending update for user approval
+        audit_warn "$pname" "Suspicious changes detected between $local_hash and $remote_hash — pending user approval"
+        pending_add_update "$(basename "$(dirname "$plugin_dir")")" "$pname" "$plugin_dir" "$local_hash" "$remote_hash" "$default_branch"
+        exit 4  # Pending approval
       fi
     fi
 
@@ -514,16 +633,137 @@ clean_old_caches() {
 
   [ -d "$cache_path" ] || return 0
 
+  local plugin_name vendor
+  plugin_name=$(basename "$cache_path")
+  vendor=$(basename "$(dirname "$cache_path")")
+
   local count=0
   while IFS= read -r ver; do
     [ -z "$ver" ] && continue
     count=$((count + 1))
     if [ "$count" -gt "$keep" ]; then
-      log_verbose "Removing old cache: $cache_path/$ver"
-      rm -rf "$cache_path/$ver"
+      if [ "$ACTION" = "force" ]; then
+        log_verbose "Removing old cache: $cache_path/$ver"
+        rm -rf "$cache_path/$ver"
+      else
+        log_verbose "Pending cleanup: $cache_path/$ver"
+        pending_add_cleanup "$cache_path/$ver" "$ver" "$plugin_name" "$vendor"
+      fi
     fi
   done <<< "$(for d in "$cache_path"/*/; do [ -d "$d" ] && basename "$d"; done | sort_semver)"
 }
+
+# --- Approve mode (interactive) ---
+
+if [ "$ACTION" = "approve" ]; then
+  if ! pending_has_items; then
+    echo "No pending actions."
+    exit 0
+  fi
+
+  # --- Pending updates ---
+  update_list=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+for u in data.get('pending_updates', []):
+    print(f'{u[\"vendor\"]}\\t{u[\"plugin_dir\"]}\\t{u[\"default_branch\"]}\\t{u[\"plugin_name\"]}\\t{u[\"old_hash\"]}\\t{u[\"new_hash\"]}')
+" "$PENDING_FILE" 2>/dev/null) || true
+
+  if [ -n "$update_list" ]; then
+    echo "=========================================="
+    echo "  PENDING PLUGIN UPDATES"
+    echo "=========================================="
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+for u in data.get('pending_updates', []):
+    print(f'  {u[\"vendor\"]}/{u[\"plugin_name\"]}:  {u[\"old_hash\"][:12]} -> {u[\"new_hash\"][:12]}')
+    print(f'  Pending since: {u[\"created_at\"]}')
+" "$PENDING_FILE"
+    echo "=========================================="
+
+    # Show relevant audit warnings
+    if [ -f "$AUDIT_LOG" ]; then
+      echo
+      echo "Security warnings from audit log:"
+      grep '^\[SECURITY\]' "$AUDIT_LOG" | tail -20
+    fi
+
+    echo
+    echo -n "Apply these updates? [y/N]: "
+    read -r response
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+      echo "$update_list" | while IFS=$'\t' read -r a_vendor a_dir a_branch a_name a_old a_new; do
+        [ -z "$a_vendor" ] && continue
+        echo "Updating $a_vendor/$a_name ..."
+        (
+          cd "$a_dir" || exit 1
+          if cmd_out=$(git merge "origin/$a_branch" 2>&1); then
+            echo "  Merged successfully."
+            if [ -f "package.json" ]; then
+              if command -v bun &>/dev/null; then
+                bun install --frozen-lockfile 2>&1 || true
+              elif command -v npm &>/dev/null; then
+                npm ci 2>&1 || true
+              fi
+            fi
+          else
+            echo "  Merge FAILED (conflicts?). Aborting merge."
+            git merge --abort 2>/dev/null || true
+            exit 1
+          fi
+        ) && update_registry "$a_vendor" "$a_dir" || echo "  Registry update failed."
+      done
+      pending_clear_updates
+      echo "Done."
+    else
+      echo "Skipped. Pending updates preserved."
+    fi
+    echo
+  fi
+
+  # --- Pending cleanups ---
+  cleanup_list=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+for c in data.get('pending_cleanups', []):
+    print(c['path'])
+" "$PENDING_FILE" 2>/dev/null) || true
+
+  if [ -n "$cleanup_list" ]; then
+    echo "=========================================="
+    echo "  PENDING CACHE CLEANUPS"
+    echo "=========================================="
+    python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: data = json.load(f)
+for c in data.get('pending_cleanups', []):
+    print(f'  {c[\"vendor\"]}/{c[\"plugin_name\"]} v{c[\"version\"]}')
+    print(f'    {c[\"path\"]}')
+" "$PENDING_FILE"
+    echo "=========================================="
+    echo
+    echo -n "Delete these old cache directories? [y/N]: "
+    read -r response
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+      echo "$cleanup_list" | while IFS= read -r cpath; do
+        [ -z "$cpath" ] && continue
+        if [ -d "$cpath" ]; then
+          rm -rf "$cpath"
+          echo "  Deleted: $cpath"
+        else
+          echo "  Already gone: $cpath"
+        fi
+      done
+      pending_clear_cleanups
+      echo "Done."
+    else
+      echo "Skipped. Pending cleanups preserved."
+    fi
+  fi
+
+  exit 0
+fi
 
 # --- Main ---
 
@@ -542,6 +782,10 @@ for vendor_dir in "$MARKETPLACE_DIR"/*/; do
     # Security audit blocked — propagate flag from subshell
     AUDIT_HAS_WARNINGS=1
     log_error "$vendor: update blocked by security audit"
+  elif [ "$update_result" -eq 4 ]; then
+    # Pending user approval — warnings detected, update saved to pending file
+    AUDIT_HAS_WARNINGS=1
+    log_verbose "$vendor: update pending user approval"
   elif [ "$update_result" -eq 1 ]; then
     log_verbose "$vendor: update failed (git/network error)"
   fi
@@ -585,4 +829,11 @@ if [ "$AUDIT_HAS_WARNINGS" -eq 1 ]; then
     echo "Full log: $AUDIT_LOG"
     echo
   fi
+fi
+
+# Notify about pending actions (stdout — visible to Claude Code)
+if pending_has_items; then
+  log_notify "Pending actions require your approval."
+  pending_show
+  log_notify "Run: bash ~/.claude/scripts/update-plugins.sh --approve"
 fi

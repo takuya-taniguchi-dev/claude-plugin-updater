@@ -31,7 +31,7 @@ else
         "hooks": [
           {
             "type": "command",
-            "command": "bash $HOME/.claude/scripts/update-plugins.sh 2>/dev/null; exit 0",
+            "command": "bash $HOME/.claude/scripts/update-plugins.sh 2>/dev/null || true",
             "timeout": 30000
           }
         ]
@@ -42,5 +42,10 @@ HOOK
 fi
 
 echo ""
-echo "Done! Run manually:  bash ~/.claude/scripts/update-plugins.sh"
+echo "Done! Commands:"
+echo "  bash ~/.claude/scripts/update-plugins.sh           # Auto-update (hook mode)"
+echo "  bash ~/.claude/scripts/update-plugins.sh --status  # Show pending actions"
+echo "  bash ~/.claude/scripts/update-plugins.sh --approve # Review & approve pending"
+echo "  bash ~/.claude/scripts/update-plugins.sh --force   # Skip confirmations"
+echo ""
 echo "See README.md for more usage options (cron, launchd, etc.)"
