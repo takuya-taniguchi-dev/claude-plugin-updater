@@ -11,6 +11,9 @@ CACHE_DIR="$PLUGINS_DIR/cache"
 INSTALLED_PLUGINS="$PLUGINS_DIR/installed_plugins.json"
 LOCK_FILE="${TMPDIR:-/tmp}/claude-plugin-updater.lock"
 VERBOSE="${CLAUDE_PLUGIN_UPDATE_VERBOSE:-0}"
+# Audit mode: "warn" = log warnings but proceed with update (default)
+#             "block" = block updates when suspicious changes are detected
+AUDIT_MODE="${CLAUDE_PLUGIN_AUDIT_MODE:-warn}"
 
 # --- Logging ---
 
@@ -376,16 +379,24 @@ update_plugin() {
     # --- Security audit BEFORE merge ---
     # Audit the diff between current HEAD and the fetched remote ref.
     # No code from the update has been checked out or executed at this point.
+    local audit_failed=0
     if ! security_audit "$plugin_dir" "$local_hash" "$remote_hash"; then
-      audit_warn "$pname" "Update BLOCKED — suspicious changes between $local_hash and $remote_hash"
-      exit 2
+      audit_failed=1
     fi
 
     # Static audit of plugin-provided hook (never executed, only scanned)
     # Scans the NEW (post-merge) version so newly added malicious scripts are caught
     if ! static_audit_plugin_hook "$plugin_dir" "$remote_hash"; then
-      audit_warn "$pname" "Update BLOCKED — suspicious plugin audit.sh"
-      exit 2
+      audit_failed=1
+    fi
+
+    if [ "$audit_failed" -eq 1 ]; then
+      if [ "$AUDIT_MODE" = "block" ]; then
+        audit_warn "$pname" "Update BLOCKED — suspicious changes between $local_hash and $remote_hash"
+        exit 2
+      else
+        audit_warn "$pname" "Suspicious changes detected between $local_hash and $remote_hash — proceeding (audit_mode=warn)"
+      fi
     fi
 
     # Audit passed — safe to merge

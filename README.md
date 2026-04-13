@@ -144,6 +144,8 @@ systemctl --user enable --now claude-plugin-updater.timer
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `CLAUDE_PLUGINS_DIR` | `~/.claude/plugins` | Override the plugins directory path |
+| `CLAUDE_PLUGIN_AUDIT_MODE` | `warn` | Security audit behavior: `warn` (log warnings, proceed with update) or `block` (block updates with suspicious changes) |
+| `CLAUDE_PLUGIN_UPDATE_VERBOSE` | `0` | Set to `1` for verbose logging |
 
 ## Security
 
