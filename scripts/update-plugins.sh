@@ -14,16 +14,16 @@ LOCK_FILE="${TMPDIR:-/tmp}/claude-plugin-updater.lock"
 # --- Lock ---
 
 acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
-    local lock_pid
-    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null) || return 1
-    # Stale lock check (process no longer running)
-    if kill -0 "$lock_pid" 2>/dev/null; then
-      return 1
-    fi
-    rm -f "$LOCK_FILE"
+  if (set -o noclobber; echo $$ > "$LOCK_FILE") 2>/dev/null; then
+    return 0
   fi
-  echo $$ > "$LOCK_FILE"
+  local lock_pid
+  lock_pid=$(cat "$LOCK_FILE" 2>/dev/null) || return 1
+  if kill -0 "$lock_pid" 2>/dev/null; then
+    return 1
+  fi
+  rm -f "$LOCK_FILE"
+  (set -o noclobber; echo $$ > "$LOCK_FILE") 2>/dev/null
 }
 
 release_lock() {
@@ -33,6 +33,20 @@ release_lock() {
 trap release_lock EXIT
 
 # --- Functions ---
+
+detect_default_branch() {
+  local branch
+  branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
+  if [ -z "$branch" ]; then
+    for candidate in main master; do
+      if git rev-parse "origin/$candidate" &>/dev/null; then
+        branch="$candidate"
+        break
+      fi
+    done
+  fi
+  [ -n "$branch" ] && echo "$branch"
+}
 
 update_plugin() {
   local plugin_dir="$1"
@@ -47,9 +61,8 @@ update_plugin() {
     local local_hash remote_hash default_branch
     local_hash=$(git rev-parse HEAD 2>/dev/null) || exit 0
 
-    # Detect default branch without network call
-    default_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@') || true
-    [ -z "$default_branch" ] && default_branch="main"
+    default_branch=$(detect_default_branch) || exit 0
+    [ -z "$default_branch" ] && exit 0
 
     remote_hash=$(git rev-parse "origin/$default_branch" 2>/dev/null) || exit 0
 
@@ -75,9 +88,12 @@ update_registry() {
   [ -d "$plugin_dir/.git" ] || return 0
   command -v python3 &>/dev/null || return 0
 
-  local version commit_sha plugin_name
-  version=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['version'])" "$plugin_dir/package.json" 2>/dev/null) || return 0
-  plugin_name=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['name'])" "$plugin_dir/package.json" 2>/dev/null) || return 0
+  local plugin_name version commit_sha
+  read -r plugin_name version <<< "$(python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(d['name'], d['version'])
+" "$plugin_dir/package.json" 2>/dev/null)" || return 0
   commit_sha=$(git -C "$plugin_dir" rev-parse HEAD 2>/dev/null) || return 0
 
   local plugin_key="${plugin_name}@${vendor}"
@@ -98,26 +114,33 @@ new_values = {
     'lastUpdated': sys.argv[6],
 }
 
-with open(path) as f:
-    data = json.load(f)
-
-if key not in data.get('plugins', {}):
-    sys.exit(0)
-
-for entry in data['plugins'][key]:
-    entry.update(new_values)
-
 tmp_path = path + '.tmp'
-with open(tmp_path, 'w') as f:
-    json.dump(data, f, indent=2)
-    f.write('\n')
-os.replace(tmp_path, path)
+try:
+    with open(path) as f:
+        data = json.load(f)
+
+    if key not in data.get('plugins', {}):
+        sys.exit(0)
+
+    for entry in data['plugins'][key]:
+        entry.update(new_values)
+
+    with open(tmp_path, 'w') as f:
+        json.dump(data, f, indent=2)
+        f.write('\n')
+    os.replace(tmp_path, path)
+except Exception:
+    try:
+        os.remove(tmp_path)
+    except OSError:
+        pass
+    sys.exit(1)
 " "$INSTALLED_PLUGINS" "$plugin_key" "$cache_path" "$version" "$commit_sha" "$now"
 }
 
 sort_semver() {
-  # Sort version directory names by semver (descending)
-  sort -t. -k1,1rn -k2,2rn -k3,3rn
+  # Sort version directory names by semver (descending), non-semver names are excluded
+  grep -E '^[0-9]+\.[0-9]+\.[0-9]+' | sort -t. -k1,1rn -k2,2rn -k3,3rn
 }
 
 clean_old_caches() {
@@ -145,8 +168,8 @@ for vendor_dir in "$MARKETPLACE_DIR"/*/; do
   [ -d "$vendor_dir" ] || continue
   vendor=$(basename "$vendor_dir")
 
-  update_plugin "$vendor_dir"
-  update_registry "$vendor" "$vendor_dir"
+  update_plugin "$vendor_dir" || true
+  update_registry "$vendor" "$vendor_dir" || true
 
   # Clean caches for all plugins under this vendor
   if [ -d "$CACHE_DIR/$vendor" ]; then

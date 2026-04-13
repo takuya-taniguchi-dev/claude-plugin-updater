@@ -66,8 +66,7 @@ Add to `~/.claude/settings.json`:
 
 ```bash
 # Update every 6 hours
-crontab -e
-0 */6 * * * bash $HOME/.claude/scripts/update-plugins.sh >/dev/null 2>&1
+(crontab -l 2>/dev/null; echo "0 */6 * * * bash \$HOME/.claude/scripts/update-plugins.sh >/dev/null 2>&1") | crontab -
 ```
 
 ### launchd (macOS)
@@ -84,6 +83,7 @@ Create `~/Library/LaunchAgents/com.claude.plugin-updater.plist`:
     <key>ProgramArguments</key>
     <array>
         <string>bash</string>
+        <!-- Replace YOUR_USERNAME with your actual username -->
         <string>/Users/YOUR_USERNAME/.claude/scripts/update-plugins.sh</string>
     </array>
     <key>StartInterval</key>
@@ -136,7 +136,8 @@ systemctl --user enable --now claude-plugin-updater.timer
 1. Scans `~/.claude/plugins/marketplaces/` for git-managed plugins
 2. Runs `git fetch` to check for updates (skips if offline)
 3. If updates are available, pulls the latest changes and installs dependencies
-4. Scans `~/.claude/plugins/cache/` and removes all but the latest version
+4. Updates `~/.claude/plugins/installed_plugins.json` to point to the new version
+5. Scans `~/.claude/plugins/cache/` and removes all but the latest version (semver sorted)
 
 ## Configuration
 
